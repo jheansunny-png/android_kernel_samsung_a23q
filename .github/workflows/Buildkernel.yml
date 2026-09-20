@@ -1,0 +1,18 @@
+- name: Setup Build Environment
+  run: |
+    sudo apt-get update
+    sudo apt-get install -y build-essential bc flex bison libssl-dev libelf-dev \
+      gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi curl wget zip cpio git python3
+
+- name: Download Proton Clang
+  run: git clone --depth=1 https://github.com/kdrag0n/proton-clang $GITHUB_WORKSPACE/clang
+
+- name: Build the Kernel
+  run: |
+    export PATH="$GITHUB_WORKSPACE/clang/bin:$PATH"
+    make O=out ARCH=arm64 truekris_defconfig
+    make O=out ARCH=arm64 olddefconfig
+    make O=out ARCH=arm64 CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm \
+      OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip \
+      CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+      -j$(nproc --all)
