@@ -2,6 +2,11 @@ name: Build TrueKris Kernel A23 4G (sem KernelSU)
 
 on:
   workflow_dispatch:
+    inputs:
+      perf:
+        description: "Ligar otimizacoes de performance? (true/false)"
+        required: true
+        default: "false"
 
 env:
   DEFCONFIG: rsuntk_defconfig
@@ -36,7 +41,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.ccache
-          key: ccache-${{ github.sha }}
+          key: ccache-noksu-${{ github.sha }}
           restore-keys: ccache-
 
       - name: Check Defconfig
@@ -49,6 +54,8 @@ jobs:
 
       - name: Build the Kernel
         shell: bash
+        env:
+          PERF: ${{ github.event.inputs.perf }}
         run: |
           set -eo pipefail
           export PATH="$HOME/clang/bin:$PATH"
@@ -60,18 +67,27 @@ jobs:
 
           make O=out ARCH=arm64 $DEFCONFIG
 
-          # Otimizacoes seguras (sem KernelSU)
+          # Sempre: torna section mismatch nao fatal e mostra detalhes
           scripts/config --file out/.config \
-            -d CC_OPTIMIZE_FOR_SIZE -e CC_OPTIMIZE_FOR_PERFORMANCE \
-            -e CPU_FREQ_GOV_SCHEDUTIL \
-            -e TCP_CONG_BBR -e NET_SCH_FQ --set-str DEFAULT_TCP_CONG "bbr" \
-            -e ZRAM -e CRYPTO_LZ4 -e CRYPTO_ZSTD \
-            -d SCHED_DEBUG
+            -e SECTION_MISMATCH_WARN_ONLY \
+            -e DEBUG_SECTION_MISMATCH
+
+          if [ "$PERF" = "true" ]; then
+            echo "=== Otimizacoes de performance LIGADAS ==="
+            scripts/config --file out/.config \
+              -d CC_OPTIMIZE_FOR_SIZE -e CC_OPTIMIZE_FOR_PERFORMANCE \
+              -e CPU_FREQ_GOV_SCHEDUTIL \
+              -e TCP_CONG_BBR -e NET_SCH_FQ --set-str DEFAULT_TCP_CONG "bbr" \
+              -e ZRAM -e CRYPTO_LZ4 -e CRYPTO_ZSTD \
+              -d SCHED_DEBUG
+          else
+            echo "=== Otimizacoes de performance DESLIGADAS (defconfig puro) ==="
+          fi
 
           make O=out ARCH=arm64 olddefconfig
 
           echo "=== Configs efetivas ==="
-          grep -E "CC_OPTIMIZE|SCHEDUTIL|TCP_CONG_BBR|CONFIG_ZRAM=|LTO" out/.config || true
+          grep -E "CC_OPTIMIZE|SCHEDUTIL|TCP_CONG_BBR|CONFIG_ZRAM=|SECTION_MISMATCH" out/.config || true
 
           MAKE_ARGS="O=out ARCH=arm64 CC=\"ccache clang\" LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi-"
 
@@ -79,19 +95,24 @@ jobs:
           eval make $MAKE_ARGS -j$(nproc --all) Image 2>&1 | tee build.log
 
           echo "=== Fase 2: compilando dtbs (nao fatal) ==="
-          if ! eval make $MAKE_ARGS -j$(nproc --all) dtbs 2>&1 | tee -a build.log; then
+          if ! eval make $MAKE_ARGS -j1 dtbs 2>&1 | tee -a build.log; then
             echo "AVISO: dtbs falharam, o Image foi gerado mesmo assim"
             touch dtbs_failed
           fi
+
+      - name: Mostrar section mismatch
+        if: always()
+        run: |
+          echo "=== Section mismatch encontrados no log ==="
+          grep -n -A4 "Section mismatch" build.log || echo "nenhum encontrado no log"
+          echo "=== Ultimas 30 linhas do log ==="
+          tail -30 build.log || true
 
       - name: Debug dtbo (roda se os dtbs falharam)
         if: always() && hashFiles('dtbs_failed') != ''
         shell: bash
         run: |
           export PATH="$HOME/clang/bin:$PATH"
-          echo "=== scripts/Makefile.dtbo (linhas 1 a 60) ==="
-          sed -n 1,60p scripts/Makefile.dtbo || true
-          echo "=== Recompilando so o dtbo com V=1 (sem paralelismo) ==="
           make O=out ARCH=arm64 CC=clang LD=ld.lld \
             CROSS_COMPILE=aarch64-linux-gnu- V=1 -j1 \
             arch/arm64/boot/dts/samsung/a23/a23/a23_eur_open_w00_r00.dtbo 2>&1 | tail -80 || true
