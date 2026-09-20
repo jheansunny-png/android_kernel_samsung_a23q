@@ -1,0 +1,80 @@
+name: Teste Rapido DTBO (diagnostico)
+
+on:
+  workflow_dispatch:
+
+env:
+  DEFCONFIG: rsuntk_defconfig
+
+jobs:
+  dtbo-debug:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout Kernel Source
+        uses: actions/checkout@v4
+
+      - name: Setup Build Environment
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential bc flex bison libssl-dev libelf-dev \
+            gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi curl wget zip cpio git python3
+
+      - name: Cache Clang
+        id: cache-clang
+        uses: actions/cache@v4
+        with:
+          path: ~/clang
+          key: proton-clang-v1
+
+      - name: Download Proton Clang
+        if: steps.cache-clang.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth=1 https://github.com/kdrag0n/proton-clang $HOME/clang
+
+      - name: Prepare (defconfig + scripts)
+        shell: bash
+        run: |
+          set -eo pipefail
+          export PATH="$HOME/clang/bin:$PATH"
+          rm -rf out
+          mkdir -p out
+          make O=out ARCH=arm64 $DEFCONFIG
+          make O=out ARCH=arm64 olddefconfig
+          make O=out ARCH=arm64 CC=clang LD=ld.lld \
+            CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+            -j$(nproc --all) prepare scripts
+
+      - name: Info do Makefile.dtbo
+        run: |
+          echo "=== scripts/Makefile.dtbo (com numero de linha, 1 a 60) ==="
+          cat -n scripts/Makefile.dtbo | sed -n 1,60p
+          echo "=== Onde o head e usado ==="
+          grep -n "head" scripts/Makefile.dtbo || echo "nenhum head encontrado"
+          echo "=== Ferramentas relacionadas em scripts/ ==="
+          ls scripts | grep -iE "dtb|dtc|mkdtimg" || echo "nenhuma"
+          ls out/scripts/dtc 2>/dev/null || true
+          echo "=== Arquivos do DTS a23 ==="
+          ls arch/arm64/boot/dts/samsung/a23/a23 2>/dev/null | head -40 || echo "pasta nao existe"
+
+      - name: Compilar dtbs sem paralelismo (V=1)
+        shell: bash
+        run: |
+          export PATH="$HOME/clang/bin:$PATH"
+          set +e
+          make O=out ARCH=arm64 CC=clang LD=ld.lld \
+            CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+            -j1 V=1 dtbs 2>&1 | tee dtbs.log
+          echo "=== Ultimas 80 linhas ==="
+          tail -80 dtbs.log
+          echo "=== Primeiras ocorrencias de erro ==="
+          grep -nE "error|Error|No such file|not found" dtbs.log | head -20 || true
+          exit 0
+
+      - name: Upload dtbs log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dtbs-log
+          path: dtbs.log
+          if-no-files-found: ignore
