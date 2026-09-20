@@ -1,12 +1,23 @@
-name: Build TrueKris Kernel A23 4G
+name: Build A23 4G (com KernelSU rsuntk)
 
 on:
   workflow_dispatch:
+    inputs:
+      ksu_ref:
+        description: "Branch/tag do KernelSU rsuntk (v3.0.0-30-legacy ou main)"
+        required: true
+        default: "v3.0.0-30-legacy"
+      perf:
+        description: "Ligar otimizacoes de performance? (true/false)"
+        required: true
+        default: "false"
+      debug_mismatch:
+        description: "Mostrar detalhes do section mismatch? (true/false)"
+        required: true
+        default: "true"
 
 env:
   DEFCONFIG: rsuntk_defconfig
-  # Se der erro de compatibilidade, troque por: v3.0.0-30-legacy
-  KSU_REF: main
 
 jobs:
   build-kernel:
@@ -20,7 +31,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential bc flex bison libssl-dev libelf-dev \
-            gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi curl wget zip cpio git python3 ccache
+            gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi curl wget zip cpio git python3 ccache gdb
 
       - name: Cache Clang
         id: cache-clang
@@ -38,32 +49,43 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.ccache
-          key: ccache-${{ github.sha }}
+          key: ccache-ksu-${{ github.sha }}
           restore-keys: ccache-
 
       - name: Check Defconfig
         run: |
           if [ ! -f arch/arm64/configs/$DEFCONFIG ]; then
-            echo "ERRO: $DEFCONFIG não encontrado"
+            echo "ERRO: $DEFCONFIG nao encontrado"
             ls arch/arm64/configs/
             exit 1
           fi
 
-      - name: Integrate KernelSU (rsuntk fork)
+      - name: Check Hooks Before KernelSU (diagnostico)
         run: |
-          curl -LSs "https://raw.githubusercontent.com/rsuntk/KernelSU/main/kernel/setup.sh" | bash -s $KSU_REF
-          echo "=== Conteudo de drivers/kernelsu ==="
-          ls -la drivers/kernelsu/ || { echo "ERRO: integracao falhou"; exit 1; }
+          echo "=== Referencias a ksu no source ANTES de integrar ==="
+          grep -rniE "ksu_|CONFIG_KSU" fs/ security/ drivers/input/ kernel/ \
+            --include=*.c --include=*.h 2>/dev/null | head -30 || true
+          echo "=== Fim do diagnostico ==="
 
-      - name: Check Manual Hooks (diagnostico)
+      - name: Integrate KernelSU (rsuntk fork)
+        env:
+          KSU_REF: ${{ github.event.inputs.ksu_ref }}
         run: |
-          echo "=== Hooks do KernelSU no source (fs/ e drivers/input) ==="
-          grep -rnE "CONFIG_KSU|ksu_" fs/exec.c fs/open.c fs/read_write.c fs/stat.c \
-            drivers/input/input.c 2>/dev/null \
-            || echo "AVISO: hooks manuais NAO encontrados, o KSU pode compilar mas nao funcionar"
+          echo "Usando KernelSU ref: $KSU_REF"
+          curl -LSs "https://raw.githubusercontent.com/rsuntk/KernelSU/main/kernel/setup.sh" | bash -s "$KSU_REF"
+          echo "=== Conteudo de drivers/kernelsu ==="
+          if [ -d drivers/kernelsu ]; then
+            ls -la drivers/kernelsu/
+          else
+            echo "ERRO: integracao falhou"
+            exit 1
+          fi
 
       - name: Build the Kernel
         shell: bash
+        env:
+          PERF: ${{ github.event.inputs.perf }}
+          DEBUG_MM: ${{ github.event.inputs.debug_mismatch }}
         run: |
           set -eo pipefail
           export PATH="$HOME/clang/bin:$PATH"
@@ -75,32 +97,82 @@ jobs:
 
           make O=out ARCH=arm64 $DEFCONFIG
 
-          # KernelSU + performance (seguro)
+          # KernelSU + section mismatch nao fatal
           scripts/config --file out/.config \
-            -e KSU \
-            -e KPROBES -e KPROBE_EVENTS \
-            -d CC_OPTIMIZE_FOR_SIZE -e CC_OPTIMIZE_FOR_PERFORMANCE \
-            -e CPU_FREQ_GOV_SCHEDUTIL \
-            -e TCP_CONG_BBR -e NET_SCH_FQ --set-str DEFAULT_TCP_CONG "bbr" \
-            -e ZRAM -e CRYPTO_LZ4 -e CRYPTO_ZSTD \
-            -d SCHED_DEBUG
+            -e KSU -e KPROBES -e KPROBE_EVENTS \
+            -e SECTION_MISMATCH_WARN_ONLY
+          if [ "$DEBUG_MM" = "true" ]; then
+            scripts/config --file out/.config -e DEBUG_SECTION_MISMATCH
+          fi
+
+          if [ "$PERF" = "true" ]; then
+            echo "=== Otimizacoes de performance LIGADAS ==="
+            scripts/config --file out/.config \
+              -d CC_OPTIMIZE_FOR_SIZE -e CC_OPTIMIZE_FOR_PERFORMANCE \
+              -e CPU_FREQ_GOV_SCHEDUTIL \
+              -e TCP_CONG_BBR -e NET_SCH_FQ --set-str DEFAULT_TCP_CONG "bbr" \
+              -e ZRAM -e CRYPTO_LZ4 -e CRYPTO_ZSTD \
+              -d SCHED_DEBUG
+          else
+            echo "=== Otimizacoes de performance DESLIGADAS ==="
+          fi
 
           make O=out ARCH=arm64 olddefconfig
 
           echo "=== Configs efetivas ==="
-          grep -E "CONFIG_KSU|CONFIG_KPROBES=|CC_OPTIMIZE|SCHEDUTIL|TCP_CONG_BBR|CONFIG_ZRAM=|LTO" out/.config || true
+          grep -E "CONFIG_KSU|CONFIG_KPROBES=|CC_OPTIMIZE|SCHEDUTIL|TCP_CONG_BBR|CONFIG_ZRAM=|SECTION_MISMATCH" out/.config || true
 
-          make O=out ARCH=arm64 \
-            CC="ccache clang" \
-            LD=ld.lld \
-            AR=llvm-ar \
-            NM=llvm-nm \
-            OBJCOPY=llvm-objcopy \
-            OBJDUMP=llvm-objdump \
-            STRIP=llvm-strip \
-            CROSS_COMPILE=aarch64-linux-gnu- \
-            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
-            -j$(nproc --all) 2>&1 | tee build.log
+          MAKE_ARGS="O=out ARCH=arm64 CC=\"ccache clang\" LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi-"
+
+          echo "=== Fase 1: compilando Image ==="
+          eval make $MAKE_ARGS -j$(nproc --all) Image 2>&1 | tee build.log
+
+          echo "=== Fase 2: compilando dtbs (nao fatal) ==="
+          if ! eval make $MAKE_ARGS -j1 dtbs 2>&1 | tee -a build.log; then
+            echo "AVISO: dtbs falharam, o Image foi gerado mesmo assim"
+            touch dtbs_failed
+          fi
+
+      - name: Mostrar section mismatch
+        if: always()
+        run: |
+          echo "=== Section mismatch encontrados no log ==="
+          grep -n -A4 "Section mismatch" build.log || echo "nenhum encontrado no log"
+          echo "=== Ultimas 30 linhas do log ==="
+          tail -30 build.log || true
+
+      - name: Diagnostico dtbo (so se os dtbs falharam)
+        if: always() && hashFiles('dtbs_failed') != ''
+        shell: bash
+        run: |
+          set +e
+          export PATH="$HOME/clang/bin:$PATH"
+          echo "=== Base DTB (khaje) no caminho certo ==="
+          ls arch/arm64/boot/dts/vendor/qcom 2>&1 | grep -i khaje | head
+          find . -iname "khaje*" -not -path "./out/*" 2>/dev/null | head -10
+          cat .gitmodules 2>/dev/null || echo "sem .gitmodules"
+
+          echo "=== dtc direto (sem head) ==="
+          DTS=arch/arm64/boot/dts/samsung/a23/a23/a23_eur_open_w00_r00.dts
+          cpp -nostdinc -I arch/arm64/boot/dts -I arch/arm64/boot/dts/samsung \
+            -I arch/arm64/boot/dts/samsung/a23 -I include -undef -x assembler-with-cpp \
+            "$DTS" > /tmp/a23.dts.tmp 2> /tmp/cpp.err
+          out/scripts/dtc/dtc -@ -I dts -O dtb -o /tmp/a23.dtbo /tmp/a23.dts.tmp 2> /tmp/dtc.err
+          echo "codigo de saida do dtc: $? (134 = abort)"
+          grep -v "reg_format" /tmp/dtc.err | head -40
+          echo "=== Backtrace (gdb) ==="
+          gdb -batch -ex run -ex bt \
+            --args out/scripts/dtc/dtc -@ -I dts -O dtb -o /tmp/a23.dtbo /tmp/a23.dts.tmp 2>&1 \
+            | grep -v reg_format | tail -30
+
+          echo "=== Comando real do make (V=1) ==="
+          make O=out ARCH=arm64 CC=clang LD=ld.lld \
+            CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+            -j1 V=1 arch/arm64/boot/dts/samsung/a23/a23/a23_eur_open_w00_r00.dtbo \
+            > /tmp/one.log 2>&1
+          grep -nE "dtc|See more|head" /tmp/one.log | cut -c1-400 | head -20
+          tail -30 /tmp/one.log | cut -c1-300
+          exit 0
 
       - name: Verify Kernel Image
         run: |
@@ -108,30 +180,31 @@ jobs:
           ls -lh out/arch/arm64/boot/ || true
 
           if [ ! -f out/arch/arm64/boot/Image ]; then
-            echo "ERRO: Image não foi gerado, o build falhou."
+            echo "ERRO: Image nao foi gerado, o build falhou."
             exit 1
           fi
 
           SIZE=$(stat -c%s out/arch/arm64/boot/Image)
           echo "Tamanho do Image: $SIZE bytes"
           if [ "$SIZE" -lt 10000000 ]; then
-            echo "ERRO: Image pequeno demais, algo está errado."
+            echo "ERRO: Image pequeno demais, algo esta errado."
             exit 1
           fi
 
       - name: Upload Kernel Image
         uses: actions/upload-artifact@v4
         with:
-          name: TrueKris-Kernel-A23-KSU
+          name: A23-Kernel-KSU
           path: |
             out/arch/arm64/boot/Image*
             out/arch/arm64/boot/dts/**/*.dtb
+            out/arch/arm64/boot/dts/**/*.dtbo
           if-no-files-found: error
 
       - name: Upload Build Log
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: build-log
+          name: build-log-ksu
           path: build.log
           if-no-files-found: ignore
