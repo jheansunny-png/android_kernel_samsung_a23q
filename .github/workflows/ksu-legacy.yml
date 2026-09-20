@@ -1,0 +1,132 @@
+name: Build A23 KSU Legacy (rsuntk v3.0.0-30-legacy)
+
+on:
+  workflow_dispatch:
+
+env:
+  DEFCONFIG: rsuntk_defconfig
+  KSU_REF: v3.0.0-30-legacy
+
+jobs:
+  build-kernel:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout Kernel Source
+        uses: actions/checkout@v4
+
+      - name: Setup Build Environment
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential bc flex bison libssl-dev libelf-dev \
+            gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi curl wget zip cpio git python3 ccache
+
+      - name: Cache Clang
+        id: cache-clang
+        uses: actions/cache@v4
+        with:
+          path: ~/clang
+          key: proton-clang-v1
+
+      - name: Download Proton Clang
+        if: steps.cache-clang.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth=1 https://github.com/kdrag0n/proton-clang $HOME/clang
+
+      - name: Cache ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: ccache-legacy-${{ github.sha }}
+          restore-keys: ccache-
+
+      - name: Check Defconfig
+        run: |
+          if [ ! -f arch/arm64/configs/$DEFCONFIG ]; then
+            echo "ERRO: $DEFCONFIG nao encontrado"
+            ls arch/arm64/configs/
+            exit 1
+          fi
+
+      - name: Integrate KernelSU (rsuntk legacy)
+        run: |
+          curl -LSs "https://raw.githubusercontent.com/rsuntk/KernelSU/main/kernel/setup.sh" | bash -s $KSU_REF
+          echo "=== Conteudo de drivers/kernelsu ==="
+          if [ -d drivers/kernelsu ]; then
+            ls -la drivers/kernelsu/
+          else
+            echo "ERRO: integracao falhou"
+            exit 1
+          fi
+
+      - name: Build the Kernel
+        shell: bash
+        run: |
+          set -eo pipefail
+          export PATH="$HOME/clang/bin:$PATH"
+          export CCACHE_DIR="$HOME/.ccache"
+          ccache -M 5G
+
+          rm -rf out
+          mkdir -p out
+
+          make O=out ARCH=arm64 $DEFCONFIG
+
+          scripts/config --file out/.config \
+            -e KSU \
+            -e KPROBES -e KPROBE_EVENTS \
+            -d CC_OPTIMIZE_FOR_SIZE -e CC_OPTIMIZE_FOR_PERFORMANCE \
+            -e CPU_FREQ_GOV_SCHEDUTIL \
+            -e TCP_CONG_BBR -e NET_SCH_FQ --set-str DEFAULT_TCP_CONG "bbr" \
+            -e ZRAM -e CRYPTO_LZ4 -e CRYPTO_ZSTD \
+            -d SCHED_DEBUG
+
+          make O=out ARCH=arm64 olddefconfig
+
+          echo "=== Configs efetivas ==="
+          grep -E "CONFIG_KSU|CONFIG_KPROBES=|CC_OPTIMIZE|SCHEDUTIL|TCP_CONG_BBR|CONFIG_ZRAM=" out/.config || true
+
+          MAKE_ARGS="O=out ARCH=arm64 CC=\"ccache clang\" LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi-"
+
+          echo "=== Fase 1: compilando Image ==="
+          eval make $MAKE_ARGS -j$(nproc --all) Image 2>&1 | tee build.log
+
+          echo "=== Fase 2: compilando dtbs (nao fatal) ==="
+          if ! eval make $MAKE_ARGS -j1 dtbs 2>&1 | tee -a build.log; then
+            echo "AVISO: dtbs falharam, o Image foi gerado mesmo assim"
+          fi
+
+      - name: Verify Kernel Image
+        run: |
+          echo "=== Arquivos gerados em boot/ ==="
+          ls -lh out/arch/arm64/boot/ || true
+
+          if [ ! -f out/arch/arm64/boot/Image ]; then
+            echo "ERRO: Image nao foi gerado, o build falhou."
+            exit 1
+          fi
+
+          SIZE=$(stat -c%s out/arch/arm64/boot/Image)
+          echo "Tamanho do Image: $SIZE bytes"
+          if [ "$SIZE" -lt 10000000 ]; then
+            echo "ERRO: Image pequeno demais, algo esta errado."
+            exit 1
+          fi
+
+      - name: Upload Kernel Image
+        uses: actions/upload-artifact@v4
+        with:
+          name: TrueKris-Kernel-A23-KSU-legacy
+          path: |
+            out/arch/arm64/boot/Image*
+            out/arch/arm64/boot/dts/**/*.dtb
+            out/arch/arm64/boot/dts/**/*.dtbo
+          if-no-files-found: error
+
+      - name: Upload Build Log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-legacy
+          path: build.log
+          if-no-files-found: ignore
