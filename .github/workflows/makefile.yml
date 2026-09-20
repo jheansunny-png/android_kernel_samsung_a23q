@@ -53,18 +53,35 @@ jobs:
         run: |
           curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -
 
-      - name: Patch KernelSU-Next (fix sulog.h)
+      - name: Patch KernelSU-Next (compat 4.19)
         run: |
+          # 1) sulog.h: falta o include de __init/__exit
           F=drivers/kernelsu/feature/sulog.h
           if [ -f "$F" ]; then
             grep -q "linux/init.h" "$F" || sed -i '1i #include <linux/init.h>' "$F"
-            echo "=== Início do sulog.h após o patch ==="
-            head -12 "$F"
           else
             echo "ERRO: $F não encontrado"
             ls -la drivers/kernelsu/ || true
             exit 1
           fi
+
+          # 2) linux/pgtable.h não existe no 4.19, o equivalente é asm/pgtable.h
+          grep -RlE "linux/pgtable.h" drivers/kernelsu/ | while read -r f; do
+            echo "Patch pgtable: $f"
+            sed -i 's|<linux/pgtable.h>|<asm/pgtable.h>|g' "$f"
+          done
+
+          # 3) Diagnóstico: headers incluídos pelo KernelSU que não existem no source
+          echo "=== Headers possivelmente ausentes no kernel 4.19 ==="
+          grep -RhoE '#include <(linux|asm)/[^>]+>' drivers/kernelsu/ \
+            | sed -E 's/#include <(.*)>/\1/' | sort -u | while read -r h; do
+              if [ ! -f "include/$h" ] && [ ! -f "include/uapi/$h" ] \
+                 && [ ! -f "arch/arm64/include/$h" ] && [ ! -f "arch/arm64/include/uapi/$h" ] \
+                 && [ ! -f "include/asm-generic/${h#asm/}" ]; then
+                echo "FALTA: $h"
+              fi
+            done
+          echo "=== Fim do diagnóstico ==="
 
       - name: Build the Kernel
         shell: bash
