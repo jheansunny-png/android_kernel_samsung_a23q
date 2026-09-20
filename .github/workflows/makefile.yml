@@ -1,5 +1,4 @@
-- name: Build TrueKris Kernel A23 4G
-
+name: Build TrueKris Kernel A23 4G
 on:
   workflow_dispatch:
 
