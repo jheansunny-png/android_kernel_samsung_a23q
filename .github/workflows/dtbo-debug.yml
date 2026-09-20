@@ -18,7 +18,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential bc flex bison libssl-dev libelf-dev \
-            gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi curl wget zip cpio git python3
+            gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi curl wget zip cpio git python3 gdb
 
       - name: Cache Clang
         id: cache-clang
@@ -45,55 +45,57 @@ jobs:
             CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
             -j$(nproc --all) prepare scripts
 
-      - name: Diagnostico profundo do DTS
+      - name: Base DTB e submodulos
+        shell: bash
+        run: |
+          set +e
+          echo "=== arch/arm64/boot/dts/vendor existe? ==="
+          ls -la arch/arm64/boot/dts/vendor 2>&1 | head -20
+          echo "=== Conteudo de vendor/qcom (filtrando khaje) ==="
+          ls arch/arm64/boot/dts/vendor/qcom 2>&1 | grep -i khaje | head -20
+          echo "=== Qualquer arquivo khaje* no repositorio ==="
+          find . -iname "khaje*" -not -path "./out/*" 2>/dev/null | head -20
+          echo "=== .gitmodules ==="
+          cat .gitmodules 2>/dev/null || echo "sem .gitmodules"
+          exit 0
+
+      - name: dtc direto (sem head) + backtrace
         shell: bash
         run: |
           set +e
           DTS=arch/arm64/boot/dts/samsung/a23/a23/a23_eur_open_w00_r00.dts
+          DTC=out/scripts/dtc/dtc
 
-          echo "=== Onde esta o 'See more detail' (wrapper da Samsung) ==="
-          grep -rn "See more detail" scripts/ Makefile arch/arm64/Makefile 2>/dev/null
-          echo "--- contexto em Makefile.lib ---"
-          grep -n -B6 -A6 "See more detail" scripts/Makefile.lib 2>/dev/null
-
-          echo "=== Linhas #include e /include/ do DTS ==="
-          grep -nE '^\s*(#include|/include/)' "$DTS"
-
-          echo "=== Pasta vendor existe fora do kernel? ==="
-          ls -d vendor vendor/qcom ../vendor ../vendor/qcom 2>&1 | head
-
-          echo "=== Conteudo do Makefile do a23 ==="
-          cat arch/arm64/boot/dts/samsung/a23/a23/Makefile
-
-          echo "=== Preprocessador (cpp) no DTS: mostra includes faltando ==="
           cpp -nostdinc -I arch/arm64/boot/dts -I arch/arm64/boot/dts/samsung \
             -I arch/arm64/boot/dts/samsung/a23 -I include -undef -x assembler-with-cpp \
             "$DTS" > /tmp/a23.dts.tmp 2> /tmp/cpp.err
           echo "codigo de saida do cpp: $?"
-          head -30 /tmp/cpp.err
 
-          echo "=== dtc no resultado (mostra o erro real do dtc) ==="
-          out/scripts/dtc/dtc -@ -I dts -O dtb -o /tmp/a23.dtbo /tmp/a23.dts.tmp 2>&1 | head -40
+          $DTC -@ -I dts -O dtb -o /tmp/a23.dtbo /tmp/a23.dts.tmp 2> /tmp/dtc.err
+          echo "codigo de saida do dtc: $? (134 = abort)"
+          echo "linhas de saida do dtc: $(wc -l < /tmp/dtc.err)"
+          echo "=== dtc sem os avisos reg_format ==="
+          grep -v "reg_format" /tmp/dtc.err | head -40
+
+          echo "=== Backtrace do crash (gdb) ==="
+          gdb -batch -ex run -ex bt \
+            --args $DTC -@ -I dts -O dtb -o /tmp/a23.dtbo /tmp/a23.dts.tmp 2>&1 \
+            | grep -v reg_format | tail -30
           exit 0
 
-      - name: Compilar dtbs sem paralelismo (V=1)
+      - name: Comando real do dtc no make (V=1)
         shell: bash
         run: |
-          export PATH="$HOME/clang/bin:$PATH"
           set +e
+          export PATH="$HOME/clang/bin:$PATH"
           make O=out ARCH=arm64 CC=clang LD=ld.lld \
             CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
-            -j1 V=1 dtbs 2>&1 | tee dtbs.log
-          echo "=== Ultimas 80 linhas ==="
-          tail -80 dtbs.log
-          echo "=== Primeiras ocorrencias de erro ==="
-          grep -nE "error|Error|No such file|not found" dtbs.log | head -20 || true
+            -j1 V=1 \
+            arch/arm64/boot/dts/samsung/a23/a23/a23_eur_open_w00_r00.dtbo \
+            > /tmp/one.log 2>&1
+          echo "codigo de saida do make: $?"
+          echo "=== Linhas com dtc / See more / head (cortadas em 400 colunas) ==="
+          grep -nE "dtc|See more|head" /tmp/one.log | cut -c1-400 | head -20
+          echo "=== Ultimas 30 linhas ==="
+          tail -30 /tmp/one.log | cut -c1-300
           exit 0
-
-      - name: Upload dtbs log
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: dtbs-log
-          path: dtbs.log
-          if-no-files-found: ignore
