@@ -45,17 +45,36 @@ jobs:
             CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
             -j$(nproc --all) prepare scripts
 
-      - name: Info do Makefile.dtbo
+      - name: Diagnostico profundo do DTS
+        shell: bash
         run: |
-          echo "=== scripts/Makefile.dtbo (com numero de linha, 1 a 60) ==="
-          cat -n scripts/Makefile.dtbo | sed -n 1,60p
-          echo "=== Onde o head e usado ==="
-          grep -n "head" scripts/Makefile.dtbo || echo "nenhum head encontrado"
-          echo "=== Ferramentas relacionadas em scripts/ ==="
-          ls scripts | grep -iE "dtb|dtc|mkdtimg" || echo "nenhuma"
-          ls out/scripts/dtc 2>/dev/null || true
-          echo "=== Arquivos do DTS a23 ==="
-          ls arch/arm64/boot/dts/samsung/a23/a23 2>/dev/null | head -40 || echo "pasta nao existe"
+          set +e
+          DTS=arch/arm64/boot/dts/samsung/a23/a23/a23_eur_open_w00_r00.dts
+
+          echo "=== Onde esta o 'See more detail' (wrapper da Samsung) ==="
+          grep -rn "See more detail" scripts/ Makefile arch/arm64/Makefile 2>/dev/null
+          echo "--- contexto em Makefile.lib ---"
+          grep -n -B6 -A6 "See more detail" scripts/Makefile.lib 2>/dev/null
+
+          echo "=== Linhas #include e /include/ do DTS ==="
+          grep -nE '^\s*(#include|/include/)' "$DTS"
+
+          echo "=== Pasta vendor existe fora do kernel? ==="
+          ls -d vendor vendor/qcom ../vendor ../vendor/qcom 2>&1 | head
+
+          echo "=== Conteudo do Makefile do a23 ==="
+          cat arch/arm64/boot/dts/samsung/a23/a23/Makefile
+
+          echo "=== Preprocessador (cpp) no DTS: mostra includes faltando ==="
+          cpp -nostdinc -I arch/arm64/boot/dts -I arch/arm64/boot/dts/samsung \
+            -I arch/arm64/boot/dts/samsung/a23 -I include -undef -x assembler-with-cpp \
+            "$DTS" > /tmp/a23.dts.tmp 2> /tmp/cpp.err
+          echo "codigo de saida do cpp: $?"
+          head -30 /tmp/cpp.err
+
+          echo "=== dtc no resultado (mostra o erro real do dtc) ==="
+          out/scripts/dtc/dtc -@ -I dts -O dtb -o /tmp/a23.dtbo /tmp/a23.dts.tmp 2>&1 | head -40
+          exit 0
 
       - name: Compilar dtbs sem paralelismo (V=1)
         shell: bash
