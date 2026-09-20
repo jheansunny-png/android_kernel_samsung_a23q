@@ -71,7 +71,22 @@ jobs:
             sed -i 's|<linux/pgtable.h>|<asm/pgtable.h>|g' "$f"
           done
 
-          # 3) Diagnóstico: headers incluídos pelo KernelSU que não existem no source
+          # 3) strncpy_from_user_nofault (5.8+) -> strncpy_from_unsafe_user (4.19)
+          if grep -q "strncpy_from_unsafe_user" include/linux/uaccess.h; then
+            echo "strncpy_from_unsafe_user existe no source, aplicando patch"
+            grep -RlE "strncpy_from_user_nofault" drivers/kernelsu/ | while read -r f; do
+              echo "Patch nofault: $f"
+              sed -i 's/strncpy_from_user_nofault/strncpy_from_unsafe_user/g' "$f"
+            done
+          else
+            echo "ERRO: strncpy_from_unsafe_user não existe em include/linux/uaccess.h"
+            grep -rn "strncpy_from" include/linux/uaccess.h include/linux/*.h | head -20 || true
+            exit 1
+          fi
+
+          # 4) Diagnóstico: outras funções de kernel novo usadas pelo KernelSU
+          echo "=== Outras funcoes *_nofault usadas (podem dar erro depois) ==="
+          grep -Rn "_nofault" drivers/kernelsu/ || echo "nenhuma"
           echo "=== Headers possivelmente ausentes no kernel 4.19 ==="
           grep -RhoE '#include <(linux|asm)/[^>]+>' drivers/kernelsu/ \
             | sed -E 's/#include <(.*)>/\1/' | sort -u | while read -r h; do
@@ -81,7 +96,7 @@ jobs:
                 echo "FALTA: $h"
               fi
             done
-          echo "=== Fim do diagnóstico ==="
+          echo "=== Fim do diagnostico ==="
 
       - name: Build the Kernel
         shell: bash
