@@ -1,4 +1,5 @@
 name: Build TrueKris Kernel A23 4G
+
 on:
   workflow_dispatch:
 
@@ -51,6 +52,19 @@ jobs:
       - name: Integrate KernelSU-Next
         run: |
           curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -
+
+      - name: Patch KernelSU-Next (fix sulog.h)
+        run: |
+          F=drivers/kernelsu/feature/sulog.h
+          if [ -f "$F" ]; then
+            grep -q "linux/init.h" "$F" || sed -i '1i #include <linux/init.h>' "$F"
+            echo "=== Início do sulog.h após o patch ==="
+            head -12 "$F"
+          else
+            echo "ERRO: $F não encontrado"
+            ls -la drivers/kernelsu/ || true
+            exit 1
+          fi
 
       - name: Build the Kernel
         shell: bash
