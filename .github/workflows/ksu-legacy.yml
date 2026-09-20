@@ -79,12 +79,14 @@ jobs:
             -e CPU_FREQ_GOV_SCHEDUTIL \
             -e TCP_CONG_BBR -e NET_SCH_FQ --set-str DEFAULT_TCP_CONG "bbr" \
             -e ZRAM -e CRYPTO_LZ4 -e CRYPTO_ZSTD \
-            -d SCHED_DEBUG
+            -d SCHED_DEBUG \
+            -e SECTION_MISMATCH_WARN_ONLY \
+            -e DEBUG_SECTION_MISMATCH
 
           make O=out ARCH=arm64 olddefconfig
 
           echo "=== Configs efetivas ==="
-          grep -E "CONFIG_KSU|CONFIG_KPROBES=|CC_OPTIMIZE|SCHEDUTIL|TCP_CONG_BBR|CONFIG_ZRAM=" out/.config || true
+          grep -E "CONFIG_KSU|CONFIG_KPROBES=|CC_OPTIMIZE|SCHEDUTIL|TCP_CONG_BBR|CONFIG_ZRAM=|SECTION_MISMATCH" out/.config || true
 
           MAKE_ARGS="O=out ARCH=arm64 CC=\"ccache clang\" LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi-"
 
@@ -95,6 +97,12 @@ jobs:
           if ! eval make $MAKE_ARGS -j1 dtbs 2>&1 | tee -a build.log; then
             echo "AVISO: dtbs falharam, o Image foi gerado mesmo assim"
           fi
+
+      - name: Mostrar section mismatch
+        if: always()
+        run: |
+          echo "=== Section mismatch encontrados no log ==="
+          grep -n -A4 "Section mismatch" build.log || echo "nenhum encontrado no log"
 
       - name: Verify Kernel Image
         run: |
