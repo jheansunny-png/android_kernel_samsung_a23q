@@ -1,4 +1,4 @@
-name: Build TrueKris Kernel A23 4G (sem KernelSU)
+name: Build A23 4G (sem KernelSU)
 
 on:
   workflow_dispatch:
@@ -7,6 +7,10 @@ on:
         description: "Ligar otimizacoes de performance? (true/false)"
         required: true
         default: "false"
+      debug_mismatch:
+        description: "Mostrar detalhes do section mismatch? (true/false)"
+        required: true
+        default: "true"
 
 env:
   DEFCONFIG: rsuntk_defconfig
@@ -23,7 +27,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential bc flex bison libssl-dev libelf-dev \
-            gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi curl wget zip cpio git python3 ccache
+            gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi curl wget zip cpio git python3 ccache gdb
 
       - name: Cache Clang
         id: cache-clang
@@ -56,6 +60,7 @@ jobs:
         shell: bash
         env:
           PERF: ${{ github.event.inputs.perf }}
+          DEBUG_MM: ${{ github.event.inputs.debug_mismatch }}
         run: |
           set -eo pipefail
           export PATH="$HOME/clang/bin:$PATH"
@@ -67,10 +72,11 @@ jobs:
 
           make O=out ARCH=arm64 $DEFCONFIG
 
-          # Sempre: torna section mismatch nao fatal e mostra detalhes
-          scripts/config --file out/.config \
-            -e SECTION_MISMATCH_WARN_ONLY \
-            -e DEBUG_SECTION_MISMATCH
+          # Section mismatch: nao fatal
+          scripts/config --file out/.config -e SECTION_MISMATCH_WARN_ONLY
+          if [ "$DEBUG_MM" = "true" ]; then
+            scripts/config --file out/.config -e DEBUG_SECTION_MISMATCH
+          fi
 
           if [ "$PERF" = "true" ]; then
             echo "=== Otimizacoes de performance LIGADAS ==="
@@ -108,14 +114,38 @@ jobs:
           echo "=== Ultimas 30 linhas do log ==="
           tail -30 build.log || true
 
-      - name: Debug dtbo (roda se os dtbs falharam)
+      - name: Diagnostico dtbo (so se os dtbs falharam)
         if: always() && hashFiles('dtbs_failed') != ''
         shell: bash
         run: |
+          set +e
           export PATH="$HOME/clang/bin:$PATH"
+          echo "=== Base DTB (khaje) no caminho certo ==="
+          ls arch/arm64/boot/dts/vendor/qcom 2>&1 | grep -i khaje | head
+          find . -iname "khaje*" -not -path "./out/*" 2>/dev/null | head -10
+          cat .gitmodules 2>/dev/null || echo "sem .gitmodules"
+
+          echo "=== dtc direto (sem head) ==="
+          DTS=arch/arm64/boot/dts/samsung/a23/a23/a23_eur_open_w00_r00.dts
+          cpp -nostdinc -I arch/arm64/boot/dts -I arch/arm64/boot/dts/samsung \
+            -I arch/arm64/boot/dts/samsung/a23 -I include -undef -x assembler-with-cpp \
+            "$DTS" > /tmp/a23.dts.tmp 2> /tmp/cpp.err
+          out/scripts/dtc/dtc -@ -I dts -O dtb -o /tmp/a23.dtbo /tmp/a23.dts.tmp 2> /tmp/dtc.err
+          echo "codigo de saida do dtc: $? (134 = abort)"
+          grep -v "reg_format" /tmp/dtc.err | head -40
+          echo "=== Backtrace (gdb) ==="
+          gdb -batch -ex run -ex bt \
+            --args out/scripts/dtc/dtc -@ -I dts -O dtb -o /tmp/a23.dtbo /tmp/a23.dts.tmp 2>&1 \
+            | grep -v reg_format | tail -30
+
+          echo "=== Comando real do make (V=1) ==="
           make O=out ARCH=arm64 CC=clang LD=ld.lld \
-            CROSS_COMPILE=aarch64-linux-gnu- V=1 -j1 \
-            arch/arm64/boot/dts/samsung/a23/a23/a23_eur_open_w00_r00.dtbo 2>&1 | tail -80 || true
+            CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+            -j1 V=1 arch/arm64/boot/dts/samsung/a23/a23/a23_eur_open_w00_r00.dtbo \
+            > /tmp/one.log 2>&1
+          grep -nE "dtc|See more|head" /tmp/one.log | cut -c1-400 | head -20
+          tail -30 /tmp/one.log | cut -c1-300
+          exit 0
 
       - name: Verify Kernel Image
         run: |
@@ -137,7 +167,7 @@ jobs:
       - name: Upload Kernel Image
         uses: actions/upload-artifact@v4
         with:
-          name: TrueKris-Kernel-A23-noKSU
+          name: A23-Kernel-noKSU
           path: |
             out/arch/arm64/boot/Image*
             out/arch/arm64/boot/dts/**/*.dtb
@@ -148,6 +178,6 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: build-log
+          name: build-log-noksu
           path: build.log
           if-no-files-found: ignore
