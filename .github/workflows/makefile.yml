@@ -10,7 +10,7 @@ jobs:
       - name: Checkout Kernel Source
         uses: actions/with@v4
         with:
-          repository: ${{https://github.com/wonderful-mobile/android_kernel_samsung_a23q}}
+          repository: {{hashFiles}}
 
       - name: Setup Build Environment
         run: |
