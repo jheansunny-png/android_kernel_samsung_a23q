@@ -5,6 +5,8 @@ on:
 
 env:
   DEFCONFIG: rsuntk_defconfig
+  # Se der erro de compatibilidade, troque por: v3.0.0-30-legacy
+  KSU_REF: main
 
 jobs:
   build-kernel:
@@ -46,57 +48,19 @@ jobs:
             ls arch/arm64/configs/
             exit 1
           fi
-          grep -n "CONFIG_KSU" arch/arm64/configs/$DEFCONFIG || echo "KSU não está no defconfig"
-          ls -d drivers/kernelsu KernelSU* 2>/dev/null || echo "KernelSU ainda não integrado"
 
-      - name: Integrate KernelSU-Next
+      - name: Integrate KernelSU (rsuntk fork)
         run: |
-          curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -
+          curl -LSs "https://raw.githubusercontent.com/rsuntk/KernelSU/main/kernel/setup.sh" | bash -s $KSU_REF
+          echo "=== Conteudo de drivers/kernelsu ==="
+          ls -la drivers/kernelsu/ || { echo "ERRO: integracao falhou"; exit 1; }
 
-      - name: Patch KernelSU-Next (compat 4.19)
+      - name: Check Manual Hooks (diagnostico)
         run: |
-          # 1) sulog.h: falta o include de __init/__exit
-          F=drivers/kernelsu/feature/sulog.h
-          if [ -f "$F" ]; then
-            grep -q "linux/init.h" "$F" || sed -i '1i #include <linux/init.h>' "$F"
-          else
-            echo "ERRO: $F não encontrado"
-            ls -la drivers/kernelsu/ || true
-            exit 1
-          fi
-
-          # 2) linux/pgtable.h não existe no 4.19, o equivalente é asm/pgtable.h
-          grep -RlE "linux/pgtable.h" drivers/kernelsu/ | while read -r f; do
-            echo "Patch pgtable: $f"
-            sed -i 's|<linux/pgtable.h>|<asm/pgtable.h>|g' "$f"
-          done
-
-          # 3) strncpy_from_user_nofault (5.8+) -> strncpy_from_unsafe_user (4.19)
-          if grep -q "strncpy_from_unsafe_user" include/linux/uaccess.h; then
-            echo "strncpy_from_unsafe_user existe no source, aplicando patch"
-            grep -RlE "strncpy_from_user_nofault" drivers/kernelsu/ | while read -r f; do
-              echo "Patch nofault: $f"
-              sed -i 's/strncpy_from_user_nofault/strncpy_from_unsafe_user/g' "$f"
-            done
-          else
-            echo "ERRO: strncpy_from_unsafe_user não existe em include/linux/uaccess.h"
-            grep -rn "strncpy_from" include/linux/uaccess.h include/linux/*.h | head -20 || true
-            exit 1
-          fi
-
-          # 4) Diagnóstico: outras funções de kernel novo usadas pelo KernelSU
-          echo "=== Outras funcoes *_nofault usadas (podem dar erro depois) ==="
-          grep -Rn "_nofault" drivers/kernelsu/ || echo "nenhuma"
-          echo "=== Headers possivelmente ausentes no kernel 4.19 ==="
-          grep -RhoE '#include <(linux|asm)/[^>]+>' drivers/kernelsu/ \
-            | sed -E 's/#include <(.*)>/\1/' | sort -u | while read -r h; do
-              if [ ! -f "include/$h" ] && [ ! -f "include/uapi/$h" ] \
-                 && [ ! -f "arch/arm64/include/$h" ] && [ ! -f "arch/arm64/include/uapi/$h" ] \
-                 && [ ! -f "include/asm-generic/${h#asm/}" ]; then
-                echo "FALTA: $h"
-              fi
-            done
-          echo "=== Fim do diagnostico ==="
+          echo "=== Hooks do KernelSU no source (fs/ e drivers/input) ==="
+          grep -rnE "CONFIG_KSU|ksu_" fs/exec.c fs/open.c fs/read_write.c fs/stat.c \
+            drivers/input/input.c 2>/dev/null \
+            || echo "AVISO: hooks manuais NAO encontrados, o KSU pode compilar mas nao funcionar"
 
       - name: Build the Kernel
         shell: bash
