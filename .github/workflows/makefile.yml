@@ -8,9 +8,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Kernel Source
-        uses: actions/with@v4
-        with:
-          repository: ${{ github.repository }}
+        uses: actions/checkout@v4
 
       - name: Setup Build Environment
         run: |
@@ -31,10 +29,13 @@ jobs:
           export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
           export CC=clang
           
-          # Очистка перед компиляцией
+          # Garante que a pasta de saída exista
+          mkdir -p out
+          
+          # Limpeza antes da compilação
           make O=out mrproper
           
-          # Твой новый именной конфиг!
+          # Seu arquivo de configuração customizado
           make O=out truekris_defconfig
           
           # Запуск сборки на всех доступных ядрах сервера
