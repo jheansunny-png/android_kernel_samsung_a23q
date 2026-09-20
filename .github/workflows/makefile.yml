@@ -10,7 +10,7 @@ jobs:
       - name: Checkout Kernel Source
         uses: actions/with@v4
         with:
-          repository: {{hashFiles}}
+          repository: ${{ github.repository }}
 
       - name: Setup Build Environment
         run: |
